@@ -1,39 +1,71 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import sqlite3
 import requests
 import time
 from datetime import datetime
 import re
-import os
+from databaza import init_db, vloz_autora
+from ol_diela import napln_diela
 
-
-DB_PATH = "kniznica.db"
-SQL_CREATE = "kniznica-create-table.sql"
-
-#from autori import AUTORI
 AUTORI = [
-    "Fyodor Dostoevsky", "Mark Twain", "George Orwell", "Franz Kafka",
-    "Ernest Hemingway", "F. Scott Fitzgerald", "Albert Camus", "Gabriel García Márquez",
-    "J. R. R. Tolkien", "Agatha Christie", "Oscar Wilde", "Dante Alighieri"
+   # Stredovek
+    "Dante Alighieri", "Geoffrey Chaucer", "François Villon",
+
+    # Renesancia a humanizmus
+    "William Shakespeare", "Miguel de Cervantes", "Giovanni Boccaccio",
+    "Michel de Montaigne", "Christopher Marlowe",
+
+    # Klasicizmus a osvietenstvo
+    "Jean Racine", "Pierre Corneille",
+    "Jean-Jacques Rousseau", "Jonathan Swift", "Daniel Defoe",
+    "Alexander Pope", "Gotthold Ephraim Lessing",
+    "Johann Wolfgang von Goethe", "Friedrich Schiller",
+
+    # Romantizmus
+    "George Gordon Byron", "Percy Bysshe Shelley", "John Keats",
+    "Victor Hugo", "Alexandre Dumas", "Edgar Allan Poe", "Mary Shelley",
+    "Walter Scott", "Mikhail Lermontov",
+
+    # Realizmus a naturalizmus
+    "Charles Dickens", "Honoré de Balzac",
+    "Leo Tolstoy", "Fyodor Dostoevsky", "Ivan Turgenev",
+    "Anton Pavlovič Čechov", "Mark Twain", "Henry James",
+
+    # Modernizmus a 20. storočie
+    "James Joyce", "Franz Kafka", "Virginia Woolf", "Marcel Proust",
+    "Thomas Mann", "Rainer Maria Rilke", "Hermann Hesse",
+    "D. H. Lawrence", "F. Scott Fitzgerald", "Ernest Hemingway",
+    "William Faulkner", "George Orwell", "Aldous Huxley",
+    "John Steinbeck", "Albert Camus", "Jean-Paul Sartre",
+    "Antoine de Saint-Exupéry", "Samuel Beckett", "T. S. Eliot", "Ezra Pound",
+
+    # 20.–21. storočie – svetová a populárna literatúra
+    "Gabriel García Márquez", "Jorge Luis Borges", "Mario Vargas Llosa",
+    "Paulo Coelho", "Chinua Achebe", "Haruki Murakami", "Kazuo Ishiguro",
+    "Salman Rushdie", "Umberto Eco", "Milan Kundera", "Margaret Atwood",
+    "Toni Morrison", "J. R. R. Tolkien", "C. S. Lewis", "J. K. Rowling",
+    "Suzanne Collins", "George R. R. Martin", "Stephen King",
+    "Agatha Christie", "Arthur Conan Doyle", "Ray Bradbury",
+    "Isaac Asimov", "Philip K. Dick", "Joseph Conrad", "Jack London",
+    "Oscar Wilde", "Emily Brontë", "Charlotte Brontë", "Jane Austen"
 ]
 
 BASE = "https://openlibrary.org"
 
-
-# --- Pomocné funkcie ---
-
 def split_meno_priezvisko(plne_meno):
     """Rozdelí meno a priezvisko (posledné slovo = priezvisko)."""
-    if not plne_meno:
-        return "", "Neznámy"
-    plne_meno = plne_meno.strip()
-    casti = plne_meno.split()
-    if len(casti) == 1:
-        return "", casti[0]
-    priezvisko = casti[-1]
-    return plne_meno[:100], priezvisko[:50]
+    meno = ""
+    priezvisko = "Neznámy"
+    if plne_meno:
+        plne_meno = plne_meno.strip()
+        casti = plne_meno.split()
+        if len(casti) == 1:
+            priezvisko = casti[0]
+        else:
+            meno = " ".join(casti[:-1])
+            priezvisko = casti[-1]  
+    return meno[:100], priezvisko[:50]
 
 
 def parse_date(d):
@@ -75,13 +107,16 @@ def parse_date(d):
 
 
 def najdi_autora(meno):
-    """Vyhľadá autora podľa mena."""
-    url = f"{BASE}/search/authors.json"
-    r = requests.get(url, params={"q": meno, "limit": 1}, timeout=20)
+    # 1) presná fráza cez uvozovky
+    query = f'"{meno}"'
+    r = requests.get(f"{BASE}/search/authors.json",
+                    params={"q": query, "limit": 10}, timeout=20)
     r.raise_for_status()
-    data = r.json()
-    docs = data.get("docs", [])
-    return docs[0] if docs else None
+    docs = r.json().get("docs", [])
+    if docs:
+        docs.sort(key=lambda d: d.get("work_count", 0), reverse=True)
+        return docs[0]
+    return None
 
 
 def detail_autora(author_key):
@@ -89,52 +124,26 @@ def detail_autora(author_key):
     url = f"{BASE}/authors/{author_key}.json"
     r = requests.get(url, timeout=20)
     r.raise_for_status()
-    return r.json()
-
-
-def run_sql(conn,file_path):
-    """Načíta SQL schému z externého súboru a vykoná ju."""
-    if not os.path.exists(file_path):
-        print(f"❌ Súbor {file_path} neexistuje!")
-        exit(1)
-
-    with open(file_path, "r", encoding="utf-8") as f:
-        sql_script = f.read()
-
-    cur = conn.cursor()
-    cur.executescript(sql_script)
-    conn.commit()
-
-def dalsie_id(conn):
-    """Zistí nasledujúce voľné ID."""
-    c = conn.cursor()
-    c.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM autor;")
-    return c.fetchone()[0]
-
-
-def vloz_autora(conn, rec):
-    """Vloží záznam do tabuľky autor."""
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT OR IGNORE INTO autor (id, meno, priezvisko, narodenie, umrtie, ol_key)
-        VALUES (?, ?, ?, ?, ?, ?);
-    """, (rec["id"], rec["meno"], rec["priezvisko"],
-          rec["narodenie"], rec["umrtie"], rec["ol_key"]))
-    conn.commit()
-    return cur.rowcount
+    d = r.json()
+    birth = parse_date(d.get("birth_date"))
+    death = parse_date(d.get("death_date"))
+    meno, priezvisko = split_meno_priezvisko(d.get("name"))
+    return {
+        "meno": meno,
+        "priezvisko": priezvisko,
+        "narodenie": birth,
+        "umrtie": death,
+        "ol_key": author_key[:10]
+    }
+     
 
 
 # --- Hlavný program ---
 
 def main():
-    conn = sqlite3.connect(DB_PATH)
-    run_sql(conn, SQL_CREATE)
-    print(f"✅ Vytvorená SQL schéma zo súboru {SQL_CREATE}")
-
-
     inserted = 0
     skipped = 0
-
+    conn = init_db()
     for meno_autora in AUTORI:
         try:
             a = najdi_autora(meno_autora)
@@ -143,24 +152,11 @@ def main():
                 continue
 
             author_key = a.get("key", "").split("/")[-1]
-            d = detail_autora(author_key)
-
-            birth = parse_date(d.get("birth_date"))
-            death = parse_date(d.get("death_date"))
-            meno, priezvisko = split_meno_priezvisko(d.get("name") or a.get("name"))
-
-            rec = {
-                "id": dalsie_id(conn),
-                "meno": meno,
-                "priezvisko": priezvisko,
-                "narodenie": birth,
-                "umrtie": death,
-                "ol_key": author_key[:10]
-            }
-
-            rows = vloz_autora(conn, rec)
-            if rows == 1:
+            rec = detail_autora(author_key)
+            id = vloz_autora(conn, rec)
+            if id != -1:
                 inserted += 1
+                napln_diela(conn, id, rec["ol_key"])
                 print(f"✅ {rec['meno']} {rec['priezvisko']} ({rec['ol_key']})")
             else:
                 skipped += 1
